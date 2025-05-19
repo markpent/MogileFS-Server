@@ -7,7 +7,7 @@ use warnings;
 use base 'MogileFS::Worker';
 use fields qw(querystarttime reqid);
 use MogileFS::Util qw(error error_code first weighted_list
-                      device_state eurl decode_url_args);
+                      device_state eurl decode_url_args debug);
 use MogileFS::HTTPFile;
 use MogileFS::Rebalance;
 use MogileFS::Config;
