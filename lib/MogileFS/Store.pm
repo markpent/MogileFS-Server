@@ -491,7 +491,7 @@ sub TABLE_domain {
     # implies mindevcount=2
     "CREATE TABLE domain (
     dmid         SMALLINT UNSIGNED NOT NULL PRIMARY KEY,
-    namespace    VARCHAR(255),
+    namespace    VARCHAR(155),
     UNIQUE (namespace)
     )"
 }
@@ -525,7 +525,7 @@ sub TABLE_file {
     PRIMARY KEY  (fid),
 
     dmid          SMALLINT UNSIGNED NOT NULL,
-    dkey           VARCHAR(255),     # domain-defined
+    dkey           VARCHAR(150),     # domain-defined
     UNIQUE dkey  (dmid, dkey),
 
     length        BIGINT UNSIGNED,   # big limit
@@ -1263,7 +1263,7 @@ sub get_hostid_by_name {
 # get all hosts from database, returns them as list of hashrefs, hashrefs being the row contents.
 sub get_all_hosts {
     my ($self) = @_;
-    my $sth = $self->dbh->prepare("SELECT /*!40000 SQL_CACHE */ hostid, status, hostname, " .
+    my $sth = $self->dbh->prepare("SELECT hostid, status, hostname, " .
                                   "hostip, http_port, http_get_port, altip, altmask FROM host");
     $sth->execute;
     my @ret;
@@ -1276,7 +1276,7 @@ sub get_all_hosts {
 # get all devices from database, returns them as list of hashrefs, hashrefs being the row contents.
 sub get_all_devices {
     my ($self) = @_;
-    my $sth = $self->dbh->prepare("SELECT /*!40000 SQL_CACHE */ devid, hostid, mb_total, " .
+    my $sth = $self->dbh->prepare("SELECT devid, hostid, mb_total, " .
                                   "mb_used, mb_asof, status, weight FROM device");
     $self->condthrow;
     $sth->execute;
