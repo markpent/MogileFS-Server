@@ -350,6 +350,7 @@ sub cmd_create_close {
     # late validation of parameters
     my $dmid  = $args->{dmid};
     my $key   = $args->{key};
+    my $keep  = $args->{keep};
     my $fidid = $args->{fid}    or return $self->err_line("no_fid");
     my $devid = $args->{devid}  or return $self->err_line("no_devid");
     my $path  = $args->{path}   or return $self->err_line("no_path");
@@ -397,8 +398,22 @@ sub cmd_create_close {
         # storage node is unreachable or the file is missing
         my $type    = defined $size ? "missing" : "cantreach";
         my $lasterr = MogileFS::Util::last_error();
-        $failed->();
-        return $self->err_line("size_verify_error", "Expected: $args->{size}; actual: 0 ($type); path: $path; error: $lasterr")
+        my $kept = "no";
+        if(!defined($size) && $keep == "1") {
+            $kept = "yes";
+            #put the temp file back in for the retry
+            my $new_fid = $sto->register_tempfile(
+                fid     => $fidid,
+                dmid    => $trow->{dmid},
+                key     => $trow->{dkey},
+                classid => $trow->{classid},
+                devids  => $trow->{devids},
+            );
+            error("Keeping tempfile $fidid after connection error ($new_fid)")
+        } else {
+            $failed->();    
+        }
+        return $self->err_line("size_verify_error", "Expected: $args->{size}; actual: 0 ($type); path: $path; error: $lasterr; kept: $kept")
     }
 
     if ($args->{size} > -1 && ($args->{size} != $size)) {
