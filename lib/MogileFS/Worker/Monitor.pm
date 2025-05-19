@@ -38,7 +38,7 @@ sub new {
 }
 
 sub watchdog_timeout {
-    30;
+    120;
 }
 
 sub work {
