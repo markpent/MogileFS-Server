@@ -48,6 +48,7 @@ our (
     $config,
     $skipconfig,
     $daemonize,
+    $systemctl,
     $db_dsn,
     $db_user,
     $db_pass,
@@ -81,6 +82,7 @@ sub load_config {
                              's|skipconfig'  => \$skipconfig,
                              'd|debug+'      => \$cmdline{debug},
                              'D|daemonize'   => \$cmdline{daemonize},
+                             'S|Systemctl'   => \$cmdline{systemctl},
                              'dsn=s'         => \$cmdline{db_dsn},
                              'dbuser=s'      => \$cmdline{db_user},
                              'dbpass:s'      => \$cmdline{db_pass},
@@ -140,6 +142,7 @@ sub load_config {
     # specified on the command line. Command line takes precedence, then values in
     # the config file, then the defaults.
     $daemonize      = choose_value( 'daemonize', 0 );
+    $systemctl      = choose_value( 'systemctl', 0 );
     $db_dsn         = choose_value( 'db_dsn', "DBI:mysql:mogilefs" );
     $db_user        = choose_value( 'db_user', "mogile" );
     $db_pass        = choose_value( 'db_pass', "", 1 );

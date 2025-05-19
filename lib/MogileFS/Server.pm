@@ -39,6 +39,7 @@ use Symbol;
 use POSIX;
 use File::Copy ();
 use Carp;
+use Carp qw(longmess);
 use File::Basename ();
 use File::Path ();
 use Sys::Syslog ();
@@ -123,6 +124,8 @@ sub run {
         print STDERR "Sent SIGTERM to $count children.\n" if $DEBUG;
         MogileFS::ProcManager->remove_pidfile;
         Mgd::log('info', 'ending run due to SIGTERM');
+        my $long_message  = longmess( "Current stack trace" );
+        Mgd::log('info', $long_message);
         Sys::Syslog::closelog();
 
         exit 0;
@@ -275,7 +278,7 @@ sub device_factory {
 # log stuff to syslog or the screen
 sub log {
     # simple logging functionality
-    if (! $MogileFS::Config::daemonize) {
+    if (! $MogileFS::Config::daemonize && ! $MogileFS::Config::systemctl ) {
         # syslog acts like printf so we have to use printf and append a \n
         shift; # ignore the first parameter (info, warn, critical, etc)
         my $mask = shift; # format string
