@@ -2,6 +2,7 @@ package MogileFS::Device;
 use strict;
 use warnings;
 use Carp qw/croak/;
+use MogileFS::Server;
 use MogileFS::Util qw(throw);
 use MogileFS::Util qw(okay_args device_state error);
 
@@ -16,7 +17,7 @@ BEGIN {
     eval "sub TESTING () { $testing }";
 }
 
-my @observed_fields = qw/observed_state utilization/;
+my @observed_fields = qw/observed_state utilization reject_bad_md5/;
 my @fields = (qw/hostid status weight mb_total mb_used mb_asof devid/,
     @observed_fields);
 
@@ -88,21 +89,27 @@ sub observed_utilization {
     return $self->{utilization};
 }
 
+sub host_ok {
+    my $host = $_[0]->host;
+    return ($host && $host->observed_reachable);
+}
+
 sub observed_writeable {
     my $self = shift;
-    return 0 unless $self->{observed_state} && $self->{observed_state} eq 'writeable';
-    my $host = $self->host or return 0;
-    return 0 unless $host->observed_reachable;
-    return 1;
+    return 0 unless $self->host_ok;
+    return $self->{observed_state} && $self->{observed_state} eq 'writeable';
 }
 
 sub observed_readable {
     my $self = shift;
+    return 0 unless $self->host_ok;
     return $self->{observed_state} && $self->{observed_state} eq 'readable';
 }
 
 sub observed_unreachable {
     my $self = shift;
+    # host is unreachability implies device unreachability
+    return 1 unless $self->host_ok;
     return $self->{observed_state} && $self->{observed_state} eq 'unreachable';
 }
 
@@ -115,11 +122,17 @@ sub dstate {
 }
 
 sub can_delete_from {
-    return $_[0]->dstate->can_delete_from;
+    return $_[0]->host->alive && $_[0]->dstate->can_delete_from;
 }
 
+# this method is for Monitor, other workers should use should_read_from
 sub can_read_from {
-    return $_[0]->dstate->can_read_from;
+    return $_[0]->host->should_read_from && $_[0]->dstate->can_read_from;
+}
+
+# this is the only method a worker should call for checking for readability
+sub should_read_from {
+    return $_[0]->can_read_from && ($_[0]->observed_readable || $_[0]->observed_writeable);
 }
 
 # FIXME: Is there a (unrelated to this code) bug where new files aren't tested
@@ -130,7 +143,7 @@ sub should_get_new_files {
 
     return 0 unless $dstate->should_get_new_files;
     return 0 unless $self->observed_writeable;
-    return 0 unless $self->host->should_get_new_files;
+    return 0 unless $self->host->alive;
     # have enough disk space? (default: 100MB)
     my $min_free = MogileFS->config("min_free_space");
     return 0 if $self->{mb_total} &&
@@ -142,7 +155,7 @@ sub should_get_new_files {
 sub mb_free {
     my $self = shift;
     return $self->{mb_total} - $self->{mb_used}
-        if $self->{mb_total} && $self->{mb_used};
+        if $self->{mb_total} && defined $self->{mb_used};
 }
 
 sub mb_used {
@@ -169,52 +182,60 @@ sub doesnt_know_mkcol {
 # Gross class-based singleton cache.
 my %dir_made;  # /dev<n>/path -> $time
 my $dir_made_lastclean = 0;
-# returns 1 on success, 0 on failure
+
+# if no callback is supplied: returns 1 on success, 0 on failure
+# if a callback is supplied, the return value will be passed to the callback
+# upon completion.
 sub create_directory {
-    my ($self, $uri) = @_;
-    return 1 if $self->doesnt_know_mkcol;
+    my ($self, $uri, $cb) = @_;
+    if ($self->doesnt_know_mkcol || MogileFS::Config->server_setting_cached('skip_mkcol')) {
+        return $cb ? $cb->(1) : 1;
+    }
 
     # rfc2518 says we "should" use a trailing slash. Some servers
     # (nginx) appears to require it.
     $uri .= '/' unless $uri =~ m/\/$/;
 
-    return 1 if $dir_made{$uri};
-
-    my $hostid = $self->hostid;
-    my $host   = $self->host;
-    my $hostip = $host->ip        or return 0;
-    my $port   = $host->http_port or return 0;
-    my $peer = "$hostip:$port";
-
-    my $sock = IO::Socket::INET->new(PeerAddr => $peer, Timeout => 1)
-        or return 0;
-
-    print $sock "MKCOL $uri HTTP/1.0\r\n".
-        "Content-Length: 0\r\n\r\n";
-
-    my $ans = <$sock>;
-
-    # if they don't support this method, remember that
-    if ($ans && $ans =~ m!HTTP/1\.[01] (400|501)!) {
-        $self->{no_mkcol} = 1;
-        # TODO: move this into method in *monitor* worker
-        return 1;
+    if ($dir_made{$uri}) {
+        return $cb ? $cb->(1) : 1;
     }
 
-    return 0 unless $ans && $ans =~ m!^HTTP/1.[01] 2\d\d!;
+    my $res;
+    my $on_mkcol_response = sub {
+        if ($res->is_success) {
+            my $now = time();
+            $dir_made{$uri} = $now;
 
-    my $now = time();
-    $dir_made{$uri} = $now;
-
-    # cleanup %dir_made occasionally.
-    my $clean_interval = 300;  # every 5 minutes.
-    if ($dir_made_lastclean < $now - $clean_interval) {
-        $dir_made_lastclean = $now;
-        foreach my $k (keys %dir_made) {
-            delete $dir_made{$k} if $dir_made{$k} < $now - 3600;
+            # cleanup %dir_made occasionally.
+            my $clean_interval = 300;  # every 5 minutes.
+            if ($dir_made_lastclean < $now - $clean_interval) {
+                $dir_made_lastclean = $now;
+                foreach my $k (keys %dir_made) {
+                    delete $dir_made{$k} if $dir_made{$k} < $now - 3600;
+                }
+            }
+            return 1;
+        } elsif ($res->code =~ /\A(?:400|501)\z/) {
+            # if they don't support this method, remember that
+            # TODO: move this into method in *monitor* worker
+            $self->{no_mkcol} = 1;
+            return 1;
+        } else {
+            return 0;
         }
-    }
-    return 1;
+    };
+
+    my %opts = ( headers => { "Content-Length" => "0" } );
+    $self->host->http("MKCOL", $uri, \%opts, sub {
+       ($res) = @_;
+       $cb->($on_mkcol_response->()) if $cb;
+    });
+
+    return if $cb;
+
+    Danga::Socket->SetPostLoopCallback(sub { !defined $res });
+    Danga::Socket->EventLoop;
+    return $on_mkcol_response->();
 }
 
 sub fid_list {
@@ -265,7 +286,7 @@ sub can_change_to_state {
 }
 
 sub vivify_directories {
-    my ($self, $path) = @_;
+    my ($self, $path, $cb) = @_;
 
     # $path is something like:
     #    http://10.0.0.26:7500/dev2/0/000/148/0000148056.fid
@@ -281,14 +302,17 @@ sub vivify_directories {
 
     die "devid mismatch" unless $self->id == $devid;
 
-    $self->create_directory("/dev$devid/$p1");
-    $self->create_directory("/dev$devid/$p1/$p2");
-    $self->create_directory("/dev$devid/$p1/$p2/$p3");
-}
-
-# FIXME: Remove this once vestigial code is removed.
-sub set_observed_utilization {
-    return 1;
+    if ($cb) {
+        $self->create_directory("/dev$devid/$p1", sub {
+            $self->create_directory("/dev$devid/$p1/$p2", sub {
+                $self->create_directory("/dev$devid/$p1/$p2/$p3", $cb);
+            });
+        });
+    } else {
+        $self->create_directory("/dev$devid/$p1");
+        $self->create_directory("/dev$devid/$p1/$p2");
+        $self->create_directory("/dev$devid/$p1/$p2/$p3");
+    }
 }
 
 # Compatibility interface since this old routine is unfortunately called
@@ -298,6 +322,10 @@ sub set_observed_utilization {
 # Remove this in 2012.
 sub devices {
     return Mgd::device_factory()->get_all;
+}
+
+sub reject_bad_md5 {
+    return $_[0]->{reject_bad_md5};
 }
 
 1;

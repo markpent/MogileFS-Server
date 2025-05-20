@@ -12,9 +12,7 @@ use MogileFS::Test;
 find_mogclient_or_skip();
 
 my $sto = eval { temp_store(); };
-if ($sto) {
-    plan tests => 48;
-} else {
+if (!$sto) {
     plan skip_all => "Can't create temporary test database: $@";
     exit 0;
 }
@@ -82,9 +80,9 @@ ok($tmptrack->mogadm("device", "add", "hostC", 6), "created dev6 on hostC");
 {
     my $was = $be->{timeout};  # can't use local on phash :(
     $be->{timeout} = 10;
-    ok($be->do_request("do_monitor_round", {}), "waited for monitor")
+    ok($be->do_request("clear_cache", {}), "waited for monitor")
         or die "Failed to wait for monitor";
-    ok($be->do_request("do_monitor_round", {}), "waited for monitor")
+    ok($be->do_request("clear_cache", {}), "waited for monitor")
         or die "Failed to wait for monitor";
     $be->{timeout} = $was;
 }
@@ -269,11 +267,4 @@ sleep 3;
 # - fiddle mbused/mbfree for devices and test the percentages
 # - test move limits (count, size, etc)
 
-sub try_for {
-    my ($tries, $code) = @_;
-    for (1..$tries) {
-        return 1 if $code->();
-        sleep 1;
-    }
-    return 0;
-}
+done_testing();

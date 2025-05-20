@@ -62,7 +62,8 @@ sub init {
     $self->SUPER::init;
     my $database_version = $self->dbh->get_info(18); # SQL_DBMS_VER
     # We need >=pg-8.2 because we use SAVEPOINT and ROLLBACK TO.
-    die "Postgres is too old! Must use >=postgresql-8.2!" if($database_version =~ /\A0[0-7]\.|08\.0[01]/);
+    # We need >=pg-8.4 for working advisory locks
+    die "Postgres is too old! Must use >=postgresql-8.4!" if($database_version =~ /\A0[0-7]\.|08\.0[0123]/);
     $self->{lock_depth} = 0;
 }
 
@@ -110,6 +111,7 @@ sub setup_database {
 sub filter_create_sql {
     my ($self, $sql) = @_;
     $sql =~ s/\bUNSIGNED\b//g;
+    $sql =~ s/\bVARBINARY\(\d+\)/bytea/g;
     $sql =~ s/\b(?:TINY|MEDIUM)INT\b/SMALLINT/g;
     $sql =~ s/\bINT\s+NOT\s+NULL\s+AUTO_INCREMENT\b/SERIAL/g;
     $sql =~ s/# /-- /g;
@@ -290,6 +292,18 @@ sub upgrade_add_device_drain {
     }
 }
 
+sub upgrade_add_host_readonly {
+    my $self = shift;
+    my $cn;
+    unless ($self->column_constraint("host", "status", \$cn) =~ /\breadonly\b/) {
+        $self->dbh->begin_work;
+        $self->dowell("ALTER TABLE host DROP CONSTRAINT $cn");
+        $self->dowell("ALTER TABLE host ADD CONSTRAINT status CHECK(".
+                      "status IN ('alive', 'dead', 'down', 'readonly'))");
+        $self->dbh->commit;
+    }
+}
+
 sub upgrade_modify_server_settings_value {
     my $self = shift;
     unless ($self->column_type("server_settings", "value" =~ /text/i)) {
@@ -307,6 +321,13 @@ sub upgrade_add_file_to_queue_arg {
 # Postgres doesn't have or never used a MEDIUMINT for device.
 sub upgrade_modify_device_size {
     return 1;
+}
+
+sub upgrade_add_class_hashtype {
+    my ($self) = @_;
+    unless ($self->column_type("class", "hashtype")) {
+        $self->dowell("ALTER TABLE class ADD COLUMN hashtype SMALLINT");
+    }
 }
 
 # return 1 on success.  die otherwise.
@@ -431,12 +452,13 @@ sub column_type {
 }
 
 sub column_constraint {
-    my ($self, $table, $col) = @_;
-    my $sth = $self->dbh->prepare("SELECT column_name,information_schema.check_constraints.check_clause FROM information_schema.constraint_column_usage JOIN information_schema.check_constraints USING(constraint_catalog,constraint_schema,constraint_name) WHERE table_name=? AND column_name=?");
+    my ($self, $table, $col, $cn) = @_;
+    my $sth = $self->dbh->prepare("SELECT column_name,information_schema.check_constraints.check_clause,constraint_name FROM information_schema.constraint_column_usage JOIN information_schema.check_constraints USING(constraint_catalog,constraint_schema,constraint_name) WHERE table_name=? AND column_name=?");
     $sth->execute($table,$col);
     while (my $rec = $sth->fetchrow_hashref) {
         if ($rec->{column_name} eq $col) {
             $sth->finish;
+            $$cn = $rec->{constraint_name} if $cn;
             return $rec->{check_clause};
         }
     }
@@ -528,33 +550,6 @@ sub _drop_db {
 # Data-access things we override
 # --------------------------------------------------------------------------
 
-# return new classid on success (non-zero integer), die on failure
-# throw 'dup' on duplicate name
-# TODO: add locks around entire table
-sub create_class {
-    my ($self, $dmid, $classname) = @_;
-    my $dbh = $self->dbh;
-
-    # get the max class id in this domain
-    my $maxid = $dbh->selectrow_array
-        ('SELECT MAX(classid) FROM class WHERE dmid = ?', undef, $dmid) || 0;
-
-    # now insert the new class
-    my $rv = eval {
-        $dbh->do("INSERT INTO class (dmid, classid, classname, mindevcount) VALUES (?, ?, ?, ?)",
-                 undef, $dmid, $maxid + 1, $classname, 2);
-    };
-    if ($@ || $dbh->err) {
-        # first is error code for duplicates
-        if ($self->was_duplicate_error) {
-            throw("dup");
-        }
-    }
-    return $maxid + 1 if $rv;
-    $self->condthrow;
-    die;
-}
-
 # returns 1 on success, 0 on duplicate key error, dies on exception
 # TODO: need a test to hit the duplicate name error condition
 sub rename_file {
@@ -606,19 +601,6 @@ sub update_devcount_atomic {
     $self->dbh->commit;
     $self->condthrow;
     return $rv;
-}
-
-sub should_begin_replicating_fidid {
-    my ($self, $fidid) = @_;
-    my $lockname = "mgfs:fid:$fidid:replicate";
-    return 1 if $self->get_lock($lockname, 1);
-    return 0;
-}
-
-sub note_done_replicating {
-    my ($self, $fidid) = @_;
-    my $lockname = "mgfs:fid:$fidid:replicate";
-    $self->release_lock($lockname);
 }
 
 # enqueue a fidid for replication, from a specific deviceid (can be undef), in a given number of seconds.
@@ -725,38 +707,14 @@ sub create_device {
     return 1;
 }
 
-sub mark_fidid_unreachable {
-    my ($self, $fidid) = @_;
-    my $dbh = $self->dbh;
-
-    eval {
-        $self->insert_or_update(
-            insert => "INSERT INTO unreachable_fids (fid, lastupdate) VALUES (?, ".$self->unix_timestamp.")",
-            insert_vals => [ $fidid ],
-            update => "UPDATE unreachable_fids SET lastupdate = ".$self->unix_timestamp." WHERE field = ?",
-            update_vals => [ $fidid ],
-        );
-    };
-}
-
-sub delete_fidid {
-    my ($self, $fidid) = @_;
-    $self->dbh->do("DELETE FROM file WHERE fid=?", undef, $fidid);
-    $self->condthrow;
-    $self->dbh->do("DELETE FROM tempfile WHERE fid=?", undef, $fidid);
-    $self->condthrow;
-    $self->enqueue_for_delete2($fidid, 0);
-    $self->condthrow;
-}
-
 sub replace_into_file {
     my $self = shift;
-    my %arg  = $self->_valid_params([qw(fidid dmid key length classid)], @_);
+    my %arg  = $self->_valid_params([qw(fidid dmid key length classid devcount)], @_);
     $self->insert_or_update(
-        insert => "INSERT INTO file (fid, dmid, dkey, length, classid, devcount) VALUES (?, ?, ?, ?, ?, 0)",
-        insert_vals => [ @arg{'fidid', 'dmid', 'key', 'length', 'classid'} ],
-        update => "UPDATE file SET dmid=?, dkey=?, length=?, classid=?, devcount=0 WHERE fid=?",
-        update_vals => [ @arg{'dmid', 'key', 'length', 'classid', 'fidid'} ],
+        insert => "INSERT INTO file (fid, dmid, dkey, length, classid, devcount) VALUES (?, ?, ?, ?, ?, ?)",
+        insert_vals => [ @arg{'fidid', 'dmid', 'key', 'length', 'classid', 'devcount'} ],
+        update => "UPDATE file SET dmid=?, dkey=?, length=?, classid=?, devcount=? WHERE fid=?",
+        update_vals => [ @arg{'dmid', 'key', 'length', 'classid', 'devcount', 'fidid'} ],
     );
     $self->condthrow;
 }
@@ -790,27 +748,30 @@ sub lockid {
 # returns 1 on success and 0 on timeout
 sub get_lock {
     my ($self, $lockname, $timeout) = @_;
+    my $hostid = lockid(hostname);
     my $lockid = lockid($lockname);
-    die "Lock recursion detected (grabbing $lockname ($lockid), had $self->{last_lock} (".lockid($self->{last_lock}).").  Bailing out." if $self->{lock_depth};
+    die sprintf("Lock recursion detected (grabbing %s on %s (%s/%s), had %s (%s). Bailing out.", $lockname, hostname, $hostid, $lockid, $self->{last_lock}, lockid($self->{last_lock})) if $self->{lock_depth};
 
     debug("$$ Locking $lockname ($lockid)\n") if $Mgd::DEBUG >= 5;
 
     my $lock = undef;
-    while($timeout > 0 and not defined($lock)) {
-        $lock = eval { $self->dbh->do('INSERT INTO lock (lockid,hostname,pid,acquiredat) VALUES (?, ?, ?, '.$self->unix_timestamp().')', undef, $lockid, hostname, $$) };
-        if($self->was_duplicate_error) {
-            $timeout--;
-            sleep 1;
-            next;
-        }
+    while($timeout >= 0) {
+        $lock = $self->dbh->selectrow_array("SELECT pg_try_advisory_lock(?, ?)", undef, $hostid, $lockid);
         $self->condthrow;
-        #$lock = $self->dbh->selectrow_array("SELECT pg_try_advisory_lock(?, ?)", undef, $lockid, $timeout);
-        #warn("$$ Lock result=$lock\n");
-        if (defined $lock and $lock == 1) {
-            $self->{lock_depth} = 1;
-            $self->{last_lock}  = $lockname;
+        if (defined $lock) {
+            if($lock == 1) {
+                $self->{lock_depth} = 1;
+                $self->{last_lock}  = $lockname;
+                last;
+            } elsif($lock == 0) {
+                sleep 1 if $timeout > 0;
+                $timeout--;
+                next;
+            } else {
+                die "Something went horribly wrong while getting lock $lockname - unknown return value";
+            }
         } else {
-            die "Something went horribly wrong while getting lock $lockname";
+            die "Something went horribly wrong while getting lock $lockname - undefined lock";
         }
     }
     return $lock;
@@ -820,14 +781,48 @@ sub get_lock {
 # returns 1 on success and 0 if no lock we have has that name.
 sub release_lock {
     my ($self, $lockname) = @_;
+    my $hostid = lockid(hostname);
     my $lockid = lockid($lockname);
     debug("$$ Unlocking $lockname ($lockid)\n") if $Mgd::DEBUG >= 5;
-    #my $rv = $self->dbh->selectrow_array("SELECT pg_advisory_unlock(?)", undef, $lockid);
-    my $rv = $self->dbh->do('DELETE FROM lock WHERE lockid=? AND pid=? AND hostname=?', undef, $lockid, $$, hostname);
+    my $rv = $self->dbh->selectrow_array("SELECT pg_advisory_unlock(?, ?)", undef, $hostid, $lockid);
     debug("Double-release of lock $lockname!") if $self->{lock_depth} != 0 and $rv == 0 and $Mgd::DEBUG >= 2;
     $self->condthrow;
     $self->{lock_depth} = 0;
     return $rv;
+}
+
+sub BLOB_BIND_TYPE { { pg_type => PG_BYTEA } }
+
+sub set_checksum {
+	my ($self, $fidid, $hashtype, $checksum) = @_;
+    my $dbh = $self->dbh;
+
+    $dbh->begin_work;
+    eval {
+        my $sth = $dbh->prepare("INSERT INTO checksum " .
+                                "(fid, hashtype, checksum) ".
+                                "VALUES (?, ?, ?)");
+        $sth->bind_param(1, $fidid);
+        $sth->bind_param(2, $hashtype);
+        $sth->bind_param(3, $checksum, BLOB_BIND_TYPE);
+        $sth->execute;
+    };
+    if ($@ || $dbh->err) {
+        if ($self->was_duplicate_error) {
+            eval {
+                my $sth = $dbh->prepare("UPDATE checksum " .
+                                        "SET hashtype = ?, checksum = ? " .
+                                        "WHERE fid = ?");
+                $sth->bind_param(1, $hashtype);
+                $sth->bind_param(2, $checksum, BLOB_BIND_TYPE);
+                $sth->bind_param(3, $fidid);
+                $sth->execute;
+            };
+            $self->condthrow;
+        }
+    }
+    $dbh->commit;
+    $self->condthrow;
 }
 
 1;

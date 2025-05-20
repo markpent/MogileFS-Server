@@ -3,6 +3,8 @@ use strict;
 use warnings;
 use Carp qw(croak);
 use List::Util ();
+use MogileFS::Server ();
+
 # Note: The filters aren't written for maximum speed, as they're not likely
 # in the slow path. They're supposed to be readable/extensible. Please don't
 # cram them down unless you have to.
@@ -57,6 +59,9 @@ my %default_state = (
     time_started => 0,
     time_finished => 0,
     time_stopped => 0,
+    time_latest_run => 0,
+    time_latest_empty_run => 0,
+    empty_runs => 0,
 );
 
 sub new {
@@ -163,6 +168,7 @@ sub _parse_settings {
     # the constraint also serves as a set of defaults.
     %parsed = %{$constraint} if ($constraint);
 
+    return unless $settings;
     # parse out from a string: key=value key=value
     for my $tuple (split /\s/, $settings) {
         my ($key, $value) = split /=/, $tuple;
@@ -242,6 +248,12 @@ sub next_fids_to_rebalance {
         push(@devfids, [$fid->id, $sdev->id, $destdevs]);
     }
 
+    $state->{time_latest_run} = time;
+    unless (@devfids) {
+        $state->{empty_runs}++;
+        $state->{time_latest_empty_run} = time;
+    }
+
     # return block of fiddev combos.
     return \@devfids;
 }
@@ -297,7 +309,7 @@ sub _choose_dest_devs {
     my @shuffled_devs = List::Util::shuffle(@$filtered_devs);
     return \@shuffled_devs if ($p->{use_dest_devs} eq 'all');
 
-    return splice @shuffled_devs, 0, $p->{use_dest_devs};
+    return [splice @shuffled_devs, 0, $p->{use_dest_devs}];
 }
 
 # Iterate through all possible constraints until we have a final list.

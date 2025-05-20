@@ -82,21 +82,22 @@ sub check_slave {
 
     return 0 unless $self->{slave};
 
-    my $next_check = \$self->{slave_next_check};
+    my $next_check = \$self->{slave}->{next_check};
 
     if ($$next_check > time()) {
         return 1;
     }
 
-    my $master_status = eval { $self->dbh->selectrow_hashref("SHOW MASTER STATUS") };
-    warn "Error thrown: '$@' while trying to get master status." if $@;
+    #my $slave_status = eval { $self->{slave}->dbh->selectrow_hashref("SHOW SLAVE STATUS") };
+    #warn "Error thrown: '$@' while trying to get slave status." if $@;
 
-    my $slave_status = eval { $self->{slave}->dbh->selectrow_hashref("SHOW SLAVE STATUS") };
-    warn "Error thrown: '$@' while trying to get slave status." if $@;
-
-    # compare contrast, return 0 if not okay.
-    # Master: File Position
-    # Slave: 
+    # TODO: Check show slave status *unless* a server setting is present to
+    # tell us to ignore it (like in a multi-DC setup).
+    eval { $self->{slave}->dbh };
+    if ($@) {
+        warn "Error while checking slave: $@";
+        return 0;
+    }
 
     # call time() again here because SQL blocks.
     $$next_check = time() + 5;
@@ -125,6 +126,18 @@ sub release_lock {
     my $rv = $self->dbh->selectrow_array("SELECT RELEASE_LOCK(?)", undef, $lockname);
     $self->{lock_depth} = 0;
     return $rv;
+}
+
+sub lock_queue {
+    my ($self, $type) = @_;
+    my $lock = $self->get_lock('mfsd:' . $type, 30);
+    return $lock ? 1 : 0;
+}
+
+sub unlock_queue {
+    my ($self, $type) = @_;
+    my $lock = $self->release_lock('mfsd:' . $type);
+    return $lock ? 1 : 0;
 }
 
 # clears everything from the fsck_log table
@@ -314,19 +327,6 @@ sub update_devcount_atomic {
     return 1;
 }
 
-sub should_begin_replicating_fidid {
-    my ($self, $fidid) = @_;
-    my $lockname = "mgfs:fid:$fidid:replicate";
-    return 1 if $self->get_lock($lockname, 1);
-    return 0;
-}
-
-sub note_done_replicating {
-    my ($self, $fidid) = @_;
-    my $lockname = "mgfs:fid:$fidid:replicate";
-    $self->release_lock($lockname);
-}
-
 sub upgrade_add_host_getport {
     my $self = shift;
     # see if they have the get port, else update it
@@ -396,6 +396,13 @@ sub upgrade_modify_device_size {
     }
 }
 
+sub upgrade_add_host_readonly {
+    my $self = shift;
+    unless ($self->column_type("host", "status") =~ /\breadonly\b/) {
+        $self->dowell("ALTER TABLE host MODIFY COLUMN status ENUM('alive', 'dead', 'down', 'readonly')");
+    }
+}
+
 sub pre_daemonize_checks {
     my $self = shift;
     # Jay Buffington, from the mailing lists, writes:
@@ -429,6 +436,37 @@ sub pre_daemonize_checks {
         die "MySQL self-tests failed.  Your DBD::mysql might've been built against an old DBI version.\n";
     }
 
+    return $self->SUPER::pre_daemonize_checks();
+}
+
+sub get_keys_like_operator {
+    my $bool = MogileFS::Config->server_setting_cached('case_sensitive_list_keys');
+    return $bool ? "LIKE /*! BINARY */" : "LIKE";
+}
+
+sub update_device_usages {
+    my ($self, $updates, $cb) = @_;
+    $cb->();
+    my $chunk = 10000; # in case we hit max_allowed_packet size(!)
+    while (scalar @$updates) {
+        my @cur = splice(@$updates, 0, $chunk);
+        my @set;
+        foreach my $fld (qw(mb_total mb_used mb_asof)) {
+            my $s = "$fld = CASE devid\n";
+            foreach my $upd (@cur) {
+                my $devid = $upd->{devid};
+                defined($devid) or croak("devid not set\n");
+                my $val = $upd->{$fld};
+                defined($val) or croak("$fld not defined for $devid\n");
+                $s .= "WHEN $devid THEN $val\n";
+            }
+            $s .= "ELSE $fld END";
+            push @set, $s;
+        }
+        my $sql = "UPDATE device SET ". join(",\n", @set);
+        $self->dowell($sql);
+        $cb->();
+    }
 }
 
 1;

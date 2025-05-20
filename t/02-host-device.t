@@ -17,9 +17,7 @@ use MogileFS::Device;
 use Data::Dumper qw/Dumper/;
 
 my $sto = eval { temp_store(); };
-if ($sto) {
-    plan tests => 21;
-} else {
+if (!$sto) {
     plan skip_all => "Can't create temporary test database: $@";
     exit 0;
 }
@@ -54,6 +52,61 @@ observed_state => 'writeable'});
     ok($dev->can_delete_from, 'can_delete_from works');
     ok($dev->can_read_from, 'can_read_from works');
     ok($dev->should_get_new_files, 'should_get_new_files works');
+
+    # monitor needs to respect can_read_from,
+    # everything else respects should_read_from
+    {
+        foreach my $s (qw/down dead/) {
+            $host->{status} = $s;
+            ok(!$host->alive, "host is not alive when $s");
+            ok(!$dev->can_read_from, "can_read_from for device fails when host is $s");
+            ok(!$dev->should_read_from, "device should not be readable when host is $s");
+        }
+        $host->{status} = "readonly";
+        ok($dev->can_read_from, "device is readable from again");
+        ok(! $dev->should_get_new_files, "device should not get new files");
+
+        $host->{status} = "alive";
+        ok($dev->can_read_from, "device is readable from again");
+        ok($dev->should_get_new_files, "device should get new files again");
+    }
+
+    # first ensure device status is respected
+    {
+        foreach my $s (qw/down dead/) {
+            $dev->{status} = $s;
+            ok(!$dev->should_read_from, "device is NOT readable when $s");
+        }
+        foreach my $s (qw/readonly drain alive/) {
+            $dev->{status} = $s;
+            ok($dev->should_read_from, "device readable when $s");
+        }
+    }
+
+    # take host observed states into account for should_read_from
+    {
+        $host->{observed_state} = "unreachable";
+        ok($dev->can_read_from, "device can be read from by monitor of unreachable");
+        ok(! $dev->should_read_from, "device should not be read from by non-monitor workers");
+        ok(! $dev->observed_readable, "device not readable");
+        ok(! $dev->observed_writeable, "device not writeable");
+        ok($dev->observed_unreachable, "device is unreachable");
+
+        $host->{observed_state} = "reachable";
+        ok($dev->should_read_from, "device is readable again by non-monitor workers");
+        ok($dev->observed_writeable, "device writable again");
+        ok(! $dev->observed_unreachable, "device is reachable again");
+    }
+
+    # take device observed states into account for should_read_from
+    {
+        $dev->{observed_state} = "unreachable";
+        ok(!$dev->should_read_from, "device should not be read from when observed unreachable");
+        foreach my $s (qw/readable writeable/) {
+            $dev->{observed_state} = $s;
+            ok($dev->should_read_from, "device should be read from when observed $s");
+        }
+    }
 
     $hostfac->remove($host);
     $devfac->remove($dev);
@@ -119,3 +172,4 @@ observed_state => 'writeable'});
     }, 'dev2 is as expected');
 }
 
+done_testing();

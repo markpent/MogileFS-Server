@@ -11,7 +11,7 @@ our @EXPORT_OK = qw(
                     error undeferr debug fatal daemonize weighted_list every
                     wait_for_readability wait_for_writeability throw error_code
                     max min first okay_args device_state eurl decode_url_args
-                    encode_url_args apply_state_events
+                    encode_url_args apply_state_events apply_state_events_list
                     );
 
 # Applies monitor-job-supplied state events against the factory singletons.
@@ -20,7 +20,10 @@ our @EXPORT_OK = qw(
 sub apply_state_events {
     my @events = split(/\s/, ${$_[0]});
     shift @events; # pop the :monitor_events part
+    apply_state_events_list(@events);
+}
 
+sub apply_state_events_list {
     # This will needlessly fetch domain/class/host most of the time.
     # Maybe replace with something that "caches" factories?
     my %factories = ( 'domain' => MogileFS::Factory::Domain->get_factory,
@@ -28,11 +31,18 @@ sub apply_state_events {
         'host'   => MogileFS::Factory::Host->get_factory,
         'device' => MogileFS::Factory::Device->get_factory, );
 
-    for my $ev (@events) {
+    for my $ev (@_) {
         my $args = decode_url_args($ev);
         my $mode = delete $args->{ev_mode};
         my $type = delete $args->{ev_type};
         my $id   = delete $args->{ev_id};
+
+        # This special case feels gross, but that's what it is.
+        if ($type eq 'srvset') {
+            my $val = $mode eq 'set' ? $args->{value} : undef;
+            MogileFS::Config->cache_server_setting($id, $val);
+            next;
+        }
 
         my $old = $factories{$type}->get_by_id($id);
         if ($mode eq 'setstate') {
@@ -88,6 +98,7 @@ sub every {
 sub debug {
     my ($msg, $level) = @_;
     return unless $Mgd::DEBUG >= 1;
+    $msg =~ s/[\r\n]+//g;
     if (my $worker = MogileFS::ProcManager->is_child) {
         $worker->send_to_parent("debug $msg");
     } else {
@@ -239,16 +250,6 @@ sub wait_for_writeability {
 
     # nfound can be undef or 0, both failures, or 1, a success
     return $nfound ? 1 : 0;
-}
-
-# if given an HTTP URL, break it down into [ host, port, URI ], else
-# returns die, because we don't support non-http-mode anymore
-sub url_parts {
-    my $path = shift;
-    if ($path =~ m!^http://(.+?)(?::(\d+))?(/.+)$!) {
-        return [ $1, $2 || 80, $3 ];
-    }
-    Carp::croak("Bogus URL: $path");
 }
 
 sub max {

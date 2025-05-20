@@ -38,6 +38,10 @@ my %child  = ();    # pid -> MogileFS::Connection::Worker
 my %todie  = ();    # pid -> 1 (lists pids that we've asked to die)
 my %jobs   = ();    # jobname -> [ min, current ]
 
+# we start job_master after monitor has run, but this avoid undef warning
+# in job_needs_reduction
+$jobs{job_master} = [ 0, 0 ];
+
 our $allkidsup = 0;  # if true, all our kids are running. set to 0 when a kid dies.
 
 my @prefork_cleanup;  # subrefs to run to clean stuff up before we make a new child
@@ -47,6 +51,14 @@ my @prefork_cleanup;  # subrefs to run to clean stuff up before we make a new ch
 my $monitor_good = 0; # ticked after monitor executes once after startup
 
 my $nowish;  # updated approximately once per second
+
+# it's pointless to spawn certain jobs without a job_master
+my $want_job_master;
+my %needs_job_master = (
+    delete => 1,
+    fsck => 1,
+    replicate => 1,
+);
 
 sub push_pre_fork_cleanup {
     my ($class, $code) = @_;
@@ -135,12 +147,14 @@ sub PostEventLoopChecker {
     my $lastspawntime = 0; # time we last ran spawn_children sub
 
     return sub {
+        MogileFS::Connection::Client->ProcessPipelined;
         # run only once per second
         $nowish = time();
         return 1 unless $nowish > $lastspawntime;
         $lastspawntime = $nowish;
 
         MogileFS::ProcManager->WatchDog;
+        MogileFS::Connection::Client->WriterWatchDog;
 
         # see if anybody has died, but don't hang up on doing so
         while(my $pid = waitpid -1, WNOHANG) {
@@ -173,6 +187,10 @@ sub PostEventLoopChecker {
 
         # foreach job, fork enough children
         while (my ($job, $jobstat) = each %jobs) {
+
+            # do not spawn job_master-dependent workers if we have no job_master
+            next if (! $want_job_master && $needs_job_master{$job});
+
             my $need = $jobstat->[0] - $jobstat->[1];
             if ($need > 0) {
                 error("Job $job has only $jobstat->[1], wants $jobstat->[0], making $need.");
@@ -212,7 +230,7 @@ sub make_new_child {
         or return error("Can't block SIGINT for fork: $!");
 
     socketpair(my $parents_ipc, my $childs_ipc, AF_UNIX, SOCK_STREAM, PF_UNSPEC )
-        or die( "Sockpair failed" );
+        or die( "socketpair failed: $!" );
 
     return error("fork failed creating $job: $!")
         unless defined ($pid = fork);
@@ -235,6 +253,9 @@ sub make_new_child {
         MogileFS::ProcManager->RegisterWorkerConn($worker_conn);
         return $worker_conn;
     }
+
+    # let children have different random number seeds
+    srand();
 
     # as a child, we want to close these and ignore them
     $_->() foreach @prefork_cleanup;
@@ -316,6 +337,8 @@ sub request_job_process {
     return 0 unless $class->is_valid_job($job);
     return 0 if ($job =~ /^(?:job_master|monitor)$/i && $n > 1); # ghetto special case
 
+    $want_job_master = $n if ($job eq "job_master");
+
     $jobs{$job}->[0] = $n;
     $allkidsup = 0;
 
@@ -341,9 +364,15 @@ sub SetAsChild {
     %ErrorsTo = ();
     %idle_workers = ();
     %pending_work = ();
+    %ChildrenByJob = ();
+    %child = ();
+    %todie = ();
+    %jobs = ();
 
-    # and now kill off our event loop so that we don't waste time
-    Danga::Socket->SetPostLoopCallback(sub { return 0; });
+    # we just forked from our parent process, also using Danga::Socket,
+    # so we need to lose all that state and start afresh.
+    Danga::Socket->Reset;
+    MogileFS::Connection::Client->Reset;
 }
 
 # called when a child has died.  a child is someone doing a job for us,
@@ -412,6 +441,10 @@ sub EnqueueCommandRequest {
                            ($client->peer_ip_string || '0.0.0.0') . " $line"
                            ];
     MogileFS::ProcManager->ProcessQueues;
+    if (@PendingQueries) {
+        # Don't like the name. Feel free to change if you find better.
+        $Stats{times_out_of_qworkers}++;
+    }
 }
 
 # puts a worker back in the queue, deleting any outstanding jobs in
@@ -554,7 +587,7 @@ sub ProcessQueues {
         next unless $clref;
 
         # get worker and make sure it's not closed already
-        my MogileFS::Connection::Worker $worker = shift @IdleQueryWorkers;
+        my MogileFS::Connection::Worker $worker = pop @IdleQueryWorkers;
         if (!defined $worker || $worker->{closed}) {
             unshift @PendingQueries, $clref;
             next;
@@ -570,11 +603,6 @@ sub ProcessQueues {
         # so we're writing a string of the form:
         #     123-455 10.2.3.123 get_paths foo=bar&blah=bar\r\n
         $worker->write("$worker->{pid}-$worker->{reqid} $clref->[1]\r\n");
-    }
-
-    if (@PendingQueries) {
-        # Don't like the name. Feel free to change if you find better.
-        $Stats{times_out_of_qworkers}++;
     }
 }
 
@@ -685,10 +713,11 @@ sub HandleChildRequest {
     } elsif ($cmd =~ /^:monitor_events/) {
         # Apply the state locally, so when we fork children they have a
         # pre-parsed factory.
-        # Also replay the event back where it came, so the same mechanism
-        # applies and uses local changes.
+        # We do not replay the events back to where it came, since this
+        # severely impacts startup performance for instances with several
+        # thousand domains, classes, hosts or devices.
         apply_state_events(\$cmd);
-        MogileFS::ProcManager->send_to_all_children($cmd);
+        MogileFS::ProcManager->send_to_all_children($cmd, $child);
 
     } elsif ($cmd eq ":monitor_just_ran") {
         send_monitor_has_run($child);
@@ -696,16 +725,12 @@ sub HandleChildRequest {
     } elsif ($cmd =~ /^:wake_a (\w+)$/) {
 
         MogileFS::ProcManager->wake_a($1, $child);
-
-    } elsif ($cmd =~ /^:invalidate_meta (\w+)/) {
-
-        my $what = $1;
-        MogileFS::ProcManager->send_to_all_children(":invalidate_meta_once $what", $child);
-
     } elsif ($cmd =~ /^:set_config_from_child (\S+) (.+)/) {
         # and this will rebroadcast it to all other children
         # (including the one that just set it to us, but eh)
         MogileFS::Config->set_config($1, $2);
+    } elsif ($cmd =~ /^:refresh_monitor$/) {
+        MogileFS::ProcManager->ImmediateSendToChildrenByJob("monitor", $cmd);
     } else {
         # unknown command
         my $show = $cmd;
@@ -783,6 +808,16 @@ sub note_pending_death {
 # see if we should reduce the number of active children
 sub job_needs_reduction {
     my $job = shift;
+    my $q;
+
+    # drop job_master-dependent workers if there is no job_master and no
+    # previously queued work
+    if (!$want_job_master && $needs_job_master{$job}
+            && $jobs{job_master}->[1] == 0 # check if job_master is really dead
+            && (($q = $pending_work{$job}) && !@$q || !$q)) {
+        return 1;
+    }
+
     return $jobs{$job}->[0] < $jobs{$job}->[1];
 }
 
@@ -817,7 +852,11 @@ sub send_monitor_has_run {
         MogileFS::ProcManager->set_min_workers('replicate'   => MogileFS->config('replicate_jobs'));
         MogileFS::ProcManager->set_min_workers('reaper'      => MogileFS->config('reaper_jobs'));
         MogileFS::ProcManager->set_min_workers('fsck'        => MogileFS->config('fsck_jobs'));
-        MogileFS::ProcManager->set_min_workers('job_master'  => 1);
+
+        # only one job_master at most
+        $want_job_master = !!MogileFS->config('job_master');
+        MogileFS::ProcManager->set_min_workers('job_master'  => $want_job_master);
+
         $monitor_good = 1;
         $allkidsup    = 0;
     }

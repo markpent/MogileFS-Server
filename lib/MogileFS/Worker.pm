@@ -26,7 +26,7 @@ sub new {
     $self->{psock}            = $psock;
     $self->{readbuf}          = '';
     $self->{last_bcast_state} = {};
-    $self->{monitor_has_run}  = 0;
+    $self->{monitor_has_run}  = MogileFS::ProcManager->is_monitor_good;
     $self->{last_ping}        = 0;
     $self->{last_wake}        = {};
     $self->{queue_depth}      = {};
@@ -41,12 +41,13 @@ sub psock_fd {
     return fileno($self->{psock});
 }
 
-sub validate_dbh {
-    return Mgd::validate_dbh();
+sub psock {
+    my $self = shift;
+    return $self->{psock};
 }
 
-sub get_dbh {
-    return Mgd::get_dbh();
+sub validate_dbh {
+    return Mgd::validate_dbh();
 }
 
 sub monitor_has_run {
@@ -62,9 +63,8 @@ sub forget_that_monitor_has_run {
 sub wait_for_monitor {
     my $self = shift;
     while (! $self->monitor_has_run) {
-        $self->read_from_parent;
+        $self->read_from_parent(1);
         $self->still_alive;
-        sleep 1;
     }
 }
 
@@ -136,7 +136,7 @@ sub read_from_parent {
     while (MogileFS::Util::wait_for_readability(fileno($psock), $timeout)) {
         $timeout = 0; # only wait on the timeout for the first read.
         my $buf;
-        my $rv = sysread($psock, $buf, 1024);
+        my $rv = sysread($psock, $buf, Mgd::UNIX_RCVBUF_SIZE());
         if (!$rv) {
             if (defined $rv) {
                 die "While reading pipe from parent, got EOF.  Parent's gone.  Quitting.\n";
@@ -186,12 +186,6 @@ sub parent_ping {
             die "No answer in 4 seconds from parent to child $self [$$], dying" if $loops > 20;
         }
     }
-}
-
-sub invalidate_meta {
-    my ($self, $what) = @_;
-    return if $Mgd::INVALIDATE_NO_PROPOGATE;  # anti recursion
-    $self->send_to_parent(":invalidate_meta $what");
 }
 
 # tries to parse generic (not job-specific) commands sent from parent
