@@ -21,4 +21,6 @@ RUNAS=$RET
 			echo "# Defaults for the mogilefsd package" >> $DEFAULTFILE
 			echo "MOGILEFSD_RUNASUSER=$RUNAS" >> $DEFAULTFILE
 	fi
+	mkdir -p /var/run/$PKG
+	chown $RUNAS /var/run/$PKG
 
