@@ -120,11 +120,19 @@ sub create_db_if_not_exists {
 
 sub grant_privileges {
     my ($pkg, $rdbh, $dbname, $user, $pass) = @_;
-    $rdbh->do("GRANT ALL PRIVILEGES ON $dbname.* TO $user\@'\%' IDENTIFIED BY ?",
+
+    $rdbh->do("CREATE USER $user\@'\%' IDENTIFIED BY ?",
              undef, $pass)
+        or die "Failed to create remote user: " . $rdbh->errstr . "\n";
+    $rdbh->do("GRANT ALL PRIVILEGES ON $dbname.* TO $user\@'\%'",
+             undef)
         or die "Failed to grant privileges: " . $rdbh->errstr . "\n";
-    $rdbh->do("GRANT ALL PRIVILEGES ON $dbname.* TO $user\@'localhost' IDENTIFIED BY ?",
+
+    $rdbh->do("CREATE USER $user\@'localhost' IDENTIFIED BY ?",
              undef, $pass)
+        or die "Failed to create local user: " . $rdbh->errstr . "\n";
+    $rdbh->do("GRANT ALL PRIVILEGES ON $dbname.* TO $user\@'localhost'",
+             undef)
         or die "Failed to grant privileges: " . $rdbh->errstr . "\n";
 }
 
