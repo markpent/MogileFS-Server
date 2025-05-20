@@ -1,0 +1,13 @@
+Package: mogstored
+Source: mogilefs-server
+Version: 2.73-2
+Architecture: all
+Maintainer: Jonathan Steinert <deb@hachi.kuiki.net>
+Installed-Size: 184
+Depends: perl (>= 5.6.0-16), libperlbal-perl, libio-aio-perl, debconf (>= 1.2.0)
+Suggests: mogilefs-utils
+Section: perl
+Priority: optional
+Description: storage node daemon for MogileFS
+ Mogstored is a storage node daemon for MogileFS, the open-source
+ application-level distributed filesystem from Danga Interactive.

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+if [ -x "/etc/init.d/mogstored" ] || [ -e "/etc/init/mogstored.conf" ]; then
+	invoke-rc.d mogstored stop || exit $?
+fi

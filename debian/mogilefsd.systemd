@@ -1,0 +1,11 @@
+[Unit]
+Description=Mogilefs Meta Data Server
+
+[Service]
+ExecStart=/usr/bin/mogilefsd
+Type=simple
+User=mogilefsd
+LimitNOFILE=16384
+
+[Install]
+WantedBy=multi-user.target

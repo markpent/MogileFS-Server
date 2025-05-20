@@ -1,0 +1,11 @@
+[Unit]
+Description=Mogilefs Data Server
+
+[Service]
+ExecStart=/usr/bin/mogstored
+Type=simple
+User=mogstored
+LimitNOFILE=16384
+
+[Install]
+WantedBy=multi-user.target

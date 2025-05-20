@@ -1,0 +1,17 @@
+Package: mogilefsd
+Source: mogilefs-server
+Version: 2.73-2
+Architecture: all
+Maintainer: Jonathan Steinert <deb@hachi.kuiki.net>
+Installed-Size: 522
+Depends: perl, libdbd-mysql-perl, libdbi-perl, debconf (>= 1.2.0), libnet-netmask-perl, libwww-perl, libdanga-socket-perl
+Suggests: mogilefs-utils
+Section: perl
+Priority: optional
+Description: scalable distributed filesystem from Danga Interactive
+ MogileFS is an open-source, application-level distributed filesystem. It
+ creates a host-neutral, filesystem-agnostic method of distributing files
+ that has many advantages over NFS and single-machine raid.  This set
+ of utilities is very scalable and can handle Livejournal.com's load, for
+ which it was designed.
+

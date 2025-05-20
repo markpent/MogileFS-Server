@@ -5,7 +5,7 @@ DEFAULTFILE=/etc/default/$PKG
 
 . /usr/share/debconf/confmodule || exit 0
 
-#DEBHELPER#
+
 
 set -e
 

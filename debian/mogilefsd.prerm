@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+if [ -x "/etc/init.d/mogilefsd" ] || [ -e "/etc/init/mogilefsd.conf" ]; then
+	invoke-rc.d mogilefsd stop || exit $?
+fi
