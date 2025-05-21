@@ -566,14 +566,17 @@ sub cmd_delete {
     # validate parameters
     my $dmid = $args->{dmid};
     my $key = $args->{key};
+    my $delay = $args->{delay};
 
     valid_key($key) or return $self->err_line("no_key");
+
+    $delay = 0 unless $delay;
 
     # is this fid still owned by this key?
     my $fid = MogileFS::FID->new_from_dmid_and_key($dmid, $key)
         or return $self->err_line("unknown_key");
 
-    $fid->delete;
+    $fid->delete($delay);
 
     return $self->ok_line;
 }

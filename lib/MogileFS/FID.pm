@@ -152,13 +152,13 @@ sub enqueue_for_replication {
 }
 
 sub delete {
-    my $fid = shift;
+    my ($fid, $in) = @_;
     my $sto = Mgd::get_store();
     my $memc = MogileFS::Config->memcache_client;
     if ($memc) {
         $fid->_tryload;
     }
-    $sto->delete_fidid($fid->id);
+    $sto->delete_fidid($fid->id, $in);
     if ($memc && $fid->{_loaded}) {
         $memc->delete("mogfid:$fid->{dmid}:$fid->{dkey}");
     }

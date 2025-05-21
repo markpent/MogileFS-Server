@@ -1290,10 +1290,10 @@ sub delete_class {
 # called from a queryworker process, will trigger delete_fidid_enqueued
 # in the delete worker
 sub delete_fidid {
-    my ($self, $fidid) = @_;
+    my ($self, $fidid, $in) = @_;
     eval { $self->dbh->do("DELETE FROM file WHERE fid=?", undef, $fidid); };
     $self->condthrow;
-    $self->enqueue_for_delete2($fidid, 0);
+    $self->enqueue_for_delete2($fidid, $in);
     $self->condthrow;
 }
 
