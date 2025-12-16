@@ -1,6 +1,6 @@
 Package: mogilefsd
 Source: mogilefs-server
-Version: 2.73-2
+Version: 2.73-3
 Architecture: all
 Maintainer: Jonathan Steinert <deb@hachi.kuiki.net>
 Installed-Size: 522

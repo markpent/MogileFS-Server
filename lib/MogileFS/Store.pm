@@ -22,7 +22,10 @@ use List::Util qw(shuffle);
 # 15: adds checksum table, adds 'hashtype' column to 'class' table
 # 16: no-op, see 17
 # 17: adds 'readonly' state to enum in host table
-use constant SCHEMA_VERSION => 17;
+# 18: adds offsite_backup table
+
+use constant SCHEMA_VERSION => 18;
+use constant OFFSITE_BACKUP_DELAY => 60 * 60; #1 hour
 
 sub new {
     my ($class) = @_;
@@ -516,7 +519,7 @@ use constant TABLES => qw( domain class file tempfile file_to_delete
                             unreachable_fids file_on file_on_corrupt host
                             device server_settings file_to_replicate
                             file_to_delete_later fsck_log file_to_queue
-                            file_to_delete2 checksum);
+                            file_to_delete2 checksum offsite_backup);
 
 sub setup_database {
     my $sto = shift;
@@ -831,6 +834,17 @@ sub TABLE_checksum {
     fid INT UNSIGNED NOT NULL PRIMARY KEY,
     hashtype TINYINT UNSIGNED NOT NULL,
     checksum VARBINARY(64) NOT NULL
+    )"
+}
+
+sub TABLE_offsite_backup {
+    "CREATE TABLE offsite_backup (
+    fid       BIGINT UNSIGNED NOT NULL,
+    type      TINYINT UNSIGNED NOT NULL,
+    nexttry   INT UNSIGNED NOT NULL,
+    failcount TINYINT UNSIGNED NOT NULL default '0',
+    PRIMARY KEY (fid, type),
+    INDEX(nexttry)
     )"
 }
 
@@ -1295,6 +1309,7 @@ sub delete_fidid {
     $self->condthrow;
     $self->enqueue_for_delete2($fidid, $in);
     $self->condthrow;
+    $self->queue_offsite_backup_delete($fidid, $in);
 }
 
 # Only called from delete workers (after delete_fidid),
@@ -1331,6 +1346,30 @@ sub replace_into_file {
         $self->dbh->do("REPLACE INTO file (fid, dmid, dkey, length, classid, devcount) ".
                        "VALUES (?,?,?,?,?,?) ", undef,
                        @arg{'fidid', 'dmid', 'key', 'length', 'classid', 'devcount'});
+    };
+    $self->condthrow;
+}
+
+sub queue_offsite_backup_add {
+    my ($self, $fidid) = @_;
+
+    my $nexttry = $self->unix_timestamp . " + " . int(OFFSITE_BACKUP_DELAY);
+
+    eval {
+        $self->dbh->do("REPLACE INTO offsite_backup(fid, type, nexttry, failcount) ".
+                       "VALUES (?,?,$nexttry,?) ", undef, $fidid, 0, 0);
+    };
+    $self->condthrow;
+}
+
+sub queue_offsite_backup_delete {
+    my ($self, $fidid, $in) = @_;
+
+    my $nexttry = $self->unix_timestamp . " + " . int($in);
+
+    eval {
+        $self->dbh->do("REPLACE INTO offsite_backup(fid, type, nexttry, failcount) ".
+                       "VALUES (?,?,$nexttry,?) ", undef, $fidid, 1, 0);
     };
     $self->condthrow;
 }

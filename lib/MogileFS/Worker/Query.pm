@@ -504,6 +504,8 @@ sub cmd_create_close {
                             devcount => 1,
                             );
 
+    $sto->queue_offsite_backup_add($fidid);
+
     # mark it as needing replicating:
     $fid->enqueue_for_replication();
 
